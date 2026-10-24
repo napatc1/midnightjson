@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.2.2";
+    const VERSION = "1.3.0";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -264,6 +264,7 @@
         pile: "design/components/Pile/native/GuildIconPile.native.tsx",
         guild: "modules/guilds_bar/native/GuildsBarGuild.tsx",
         pressable: "modules/guilds_bar/native/GuildsBarItemIconPressable.tsx",
+        drawerRow: "modules/home_drawer/native/HomeDrawerFolderRow.tsx",
     };
     const ID_HINTS = {
         "modules/guilds_bar/native/GuildsBar.tsx": 12999,
@@ -273,6 +274,7 @@
         "design/components/Pile/native/GuildIconPile.native.tsx": 10945,
         "modules/guilds_bar/native/GuildsBarGuild.tsx": 13035,
         "modules/guilds_bar/native/GuildsBarItemIconPressable.tsx": 13062,
+        "modules/home_drawer/native/HomeDrawerFolderRow.tsx": 13022,
     };
     const allMods = () => safe(() => vendetta.metro.modules || window.modules, {}) || {};
     function modByPath(path) {
@@ -346,7 +348,7 @@
         outline(node.props.children, depth + 1, out);
         return out;
     }
-    const diag = { folderProps: "", folderTree: "", barTree: "", hideResult: "not tried" };
+    const diag = { folderProps: "", folderTree: "", barTree: "", hideResult: "not tried", rowProps: "", rowTree: "" };
 
     // replace the first element whose subtree holds 2+ guild icons with a folder icon
     function hideInTree(root, tint, iconTypes) {
@@ -433,6 +435,35 @@
               })
             : null;
         if (unFolder) unpatches.push(unFolder);
+
+        // 3) home drawer layout (newer Discord): folder rows are a plain function component
+        const rowMod = modByPath(PATHS.drawerRow);
+        if (rowMod && typeof rowMod.default === "function") {
+            known.set(rowMod.default, "HomeDrawerFolderRow");
+            const unRow = patcher.after("default", rowMod, ([props], res) => {
+                stats.rowRenders = (stats.rowRenders || 0) + 1;
+                safe(() => {
+                    if (!diag.rowProps) diag.rowProps = Object.keys(props || {}).join(",") + " | " + safe(() => JSON.stringify(props, (k, v) => (typeof v === "function" ? "fn" : v && typeof v === "object" && v.$$typeof ? "<el>" : v)).slice(0, 400), "");
+                    if (!diag.rowTree) diag.rowTree = outline(res).join("\n");
+                    if (!storage.hideIcons || !res) return;
+                    const fid = pick(safe(() => props.folderNode.id), safe(() => props.folder.folderId), safe(() => props.folder.id), safe(() => props.folderId), safe(() => props.node.id), safe(() => props.item.id));
+                    const expanded = pick(props.expanded, props.isExpanded, fid != null ? isExpanded(fid) : false);
+                    if (expanded) return;
+                    const folder = fid != null ? getFolder(fid) : null;
+                    const color = toHex(pick(folder ? folder.folderColor : undefined, safe(() => props.folder.color), safe(() => props.folderColor)));
+                    const ok = hideInTree(res, color, iconTypes);
+                    diag.hideResult = ok ? "replaced (drawer)" : "no icon group in drawer row";
+                    if (ok) stats.previewPatched++;
+                });
+                if (!res) return res;
+                stats.hostAttached++;
+                stats.attachMode = "HomeDrawerFolderRow";
+                return h(React.Fragment, null, res, h(ColumnHost, { key: "bf-column-host" }));
+            });
+            unpatches.push(unRow);
+            status.hideIcons += " + drawer row";
+            if (status.column.startsWith("ok")) status.column = "ok (GuildsBar + drawer hooked)";
+        }
         status.hideIcons = unFolder ? "hooked (GuildsBarGuildFolder)" : "failed: folder component not found";
         return true;
     }
@@ -466,7 +497,7 @@
         const mods = safe(() => vendetta.metro.modules || window.modules, {}) || {};
         const out = [];
         let total = 0, withPath = 0;
-        const RX = /folder|guilds?_?bar|guild_?list|guilds?nav|guildsidebar|server_?list|guild_?item|guildicon/i;
+        const RX = /folder|guilds?_?bar|guild_?list|guilds?nav|guildsidebar|server_?list|guild_?item|guildicon|home_drawer/i;
         for (const id in mods) {
             total++;
             const m = mods[id];
@@ -489,7 +520,7 @@
             });
             out.push(`${id} ${path} [${desc}]`);
         }
-        out.unshift(`--- preloaded ${stats.preloaded || 0} · bar renders ${stats.renders} · ids ${JSON.stringify(storage.ids || {})}`, `--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
+        out.unshift(`--- preloaded ${stats.preloaded || 0} · bar renders ${stats.renders} · drawer row renders ${stats.rowRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`, `--- drawer row props: ${diag.rowProps}`, `--- drawer row tree:\n${diag.rowTree}`, `--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
         return `BetterFolders ${VERSION} scan: ${out.length} matches (${withPath}/${total} modules have paths)\n` + (out.slice(0, 120).join("\n") || "nothing found");
     }
 
@@ -608,7 +639,7 @@
             patchWhenReady();
             // if the bar was already on screen when we hooked it, React keeps the old version until a reload
             setTimeout(() => {
-                if (!stopped && stats.renders === 0 && status.column.startsWith("ok"))
+                if (!stopped && stats.renders === 0 && !stats.rowRenders && status.column.startsWith("ok"))
                     toast("BetterFolders: reload Discord once to finish setup (Settings → Kettu → Reload Discord)");
             }, 4000);
             if (status.autoCollapse !== "ok") status.column = status.autoCollapse;
