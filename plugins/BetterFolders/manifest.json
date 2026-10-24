@@ -1,0 +1,8 @@
+{
+  "name": "BetterFolders",
+  "description": "Auto-collapse server folders and hide server icons in collapsed folders. Rebuilt for Kettu.",
+  "authors": [{ "name": "fres", "id": "843448897737064448" }],
+  "main": "index.js",
+  "hash": "4b4e278024776642156db91eb7614a09839a73a81c14affc6ce8bca0902eb040",
+  "vendetta": { "icon": "img_guild_folder" }
+}
