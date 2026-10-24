@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.1.4";
+    const VERSION = "1.2.0";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -189,7 +189,7 @@
         const folder = folderId != null ? getFolder(folderId) : null;
         if (!folder) return null;
         const selectedId = safe(() => SelectedGuildStore.getGuildId(), null);
-        const left = typeof storage.columnLeft === "number" ? storage.columnLeft : 64;
+        const left = typeof storage.columnLeft === "number" ? storage.columnLeft : barWidth;
         const tint = typeof folder.folderColor === "number" ? "#" + folder.folderColor.toString(16).padStart(6, "0") : COLORS.selected;
 
         return h(
@@ -255,79 +255,156 @@
         return ownerToken === token && storage.column ? h(FolderColumn) : null;
     }
 
-    // ── feature 2: GuildContainer patch (hide icons + mount the column host) ──
+    // ── feature 2: hook Discord's server bar (found by source file path) ──
+    const PATHS = {
+        bar: "modules/guilds_bar/native/GuildsBar.tsx",
+        folder: "modules/guilds_bar/native/GuildsBarGuildFolder.tsx",
+        consts: "modules/guilds_bar/native/GuildsBarConstants.tsx",
+        guildIcon: "uikit-native/GuildIcon.tsx",
+        pile: "design/components/Pile/native/GuildIconPile.native.tsx",
+        guild: "modules/guilds_bar/native/GuildsBarGuild.tsx",
+        pressable: "modules/guilds_bar/native/GuildsBarItemIconPressable.tsx",
+    };
+    function modByPath(path) {
+        const mods = safe(() => vendetta.metro.modules || window.modules, {}) || {};
+        for (const id in mods) {
+            const m = mods[id];
+            if (m && m.__filePath === path) return safe(() => m.publicModule.exports, null);
+        }
+        return null;
+    }
+
+    // patch a component whatever its wrapper is (memo / forwardRef / plain fn)
+    function patchComponent(comp, cb) {
+        if (!comp) return null;
+        if (comp.type && typeof comp.type.render === "function") return patcher.after("render", comp.type, cb);
+        if (typeof comp.render === "function") return patcher.after("render", comp, cb);
+        if (typeof comp.type === "function") return patcher.after("type", comp, cb);
+        return null;
+    }
+
     const folderIcon = (tint) =>
         h(
             View,
-            {
-                style: {
-                    overflow: "hidden", borderRadius: 16, height: 48, width: 48,
-                    justifyContent: "center", alignItems: "center",
-                },
-            },
+            { style: { overflow: "hidden", borderRadius: 16, height: 48, width: 48, justifyContent: "center", alignItems: "center" } },
             h(Image, { source: asset("img_guild_folder"), style: tint ? { tintColor: tint } : {} }),
         );
-
+    const pick = (...vals) => {
+        for (const v of vals) if (v !== undefined && v !== null) return v;
+        return undefined;
+    };
     const toHex = (n) => (typeof n === "number" ? "#" + n.toString(16).padStart(6, "0") : n);
 
+    const known = new Map(); // component -> label, for readable diagnostics
+    const labelOf = (t) => {
+        if (typeof t === "string") return t;
+        if (!t) return String(t);
+        if (known.has(t)) return known.get(t);
+        return t.displayName || t.name || (t.type && (t.type.displayName || t.type.name)) || (t.render && t.render.name) || (t.$$typeof ? "memo/fwd" : typeof t);
+    };
+    function outline(node, depth = 0, out = []) {
+        if (out.length > 60 || depth > 6 || node == null || typeof node !== "object") return out;
+        if (Array.isArray(node)) {
+            node.forEach((n) => outline(n, depth, out));
+            return out;
+        }
+        if (!node.props) return out;
+        const keys = Object.keys(node.props).filter((k) => k !== "children").slice(0, 8).join(",");
+        out.push(`${"  ".repeat(depth)}${labelOf(node.type)} {${keys}}`);
+        outline(node.props.children, depth + 1, out);
+        return out;
+    }
+    const diag = { folderProps: "", folderTree: "", barTree: "", hideResult: "not tried" };
+
+    // replace the first element whose subtree holds 2+ guild icons with a folder icon
+    function hideInTree(root, tint, iconTypes) {
+        let replaced = false;
+        const count = (n) => {
+            if (n == null || typeof n !== "object") return 0;
+            if (Array.isArray(n)) return n.reduce((a, c) => a + count(c), 0);
+            if (!n.props) return 0;
+            return (iconTypes.has(n.type) ? 1 : 0) + count(n.props.children);
+        };
+        const walk = (n, parent, key) => {
+            if (replaced || n == null || typeof n !== "object") return;
+            if (Array.isArray(n)) return n.forEach((c, i) => walk(c, n, i));
+            if (!n.props) return;
+            if (n.type && iconTypes.has(n.type) && n.type === iconTypes.pile) {
+                parent[key] = folderIcon(tint);
+                replaced = true;
+                return;
+            }
+            const kids = n.props.children;
+            if (count(kids) >= 2 && !(Array.isArray(kids) ? kids : [kids]).some((k) => count(k) >= 2)) {
+                n.props.children = folderIcon(tint);
+                replaced = true;
+                return;
+            }
+            if (Array.isArray(kids)) kids.forEach((c, i) => walk(c, kids, i));
+            else if (kids && typeof kids === "object") walk(kids, n.props, "children");
+        };
+        walk(root, { root }, "root");
+        return replaced;
+    }
+
     function startGuildContainerPatch() {
-        const mods = safe(() => metro.findByPropsAll("GuildContainer"), []);
-        const mod = mods && mods.length ? mods[mods.length - 1] : null;
-        if (!mod) {
-            status.hideIcons = "waiting: GuildContainer not loaded yet";
-            status.column = "waiting: GuildContainer not loaded yet";
+        const barMod = modByPath(PATHS.bar);
+        if (!barMod || !barMod.default) {
+            status.hideIcons = status.column = "waiting: server bar not loaded yet";
             return false;
         }
 
-        const un = patcher.after("GuildContainer", mod, ([props], res) => {
+        // readable names for diagnostics + icon detection
+        const gi = safe(() => modByPath(PATHS.guildIcon).default);
+        const pile = safe(() => modByPath(PATHS.pile).GuildIconPile);
+        const gg = safe(() => modByPath(PATHS.guild).default);
+        const pr = safe(() => modByPath(PATHS.pressable).default);
+        const folderMod = modByPath(PATHS.folder);
+        [[gi, "GuildIcon"], [pile, "GuildIconPile"], [gg, "GuildsBarGuild"], [pr, "ItemIconPressable"],
+         [barMod.default, "GuildsBar"], [folderMod && folderMod.default, "GuildsBarGuildFolder"],
+         [folderMod && folderMod.GuildsBarGuildFolderBG, "GuildFolderBG"]].forEach(([c, n]) => c && known.set(c, n));
+        const iconTypes = new Set([gi, pile, gg].filter(Boolean));
+        iconTypes.pile = pile;
+
+        const width = safe(() => modByPath(PATHS.consts).GUILD_LIST_WIDTH);
+        if (typeof width === "number") barWidth = width;
+
+        // 1) mount the column host next to the server bar
+        const unBar = patchComponent(barMod.default, (args, res) => {
             stats.renders++;
-            safe(() => {
-                if (!storage.hideIcons || !props || props.expanded) return;
-                const Preview = props.children && props.children.type;
-
-                if (Preview && Preview.type) {
-                    const once = patcher.after("type", Preview, ([fp], g) => {
-                        once();
-                        stats.previewPatched++;
-                        safe(() => {
-                            if (props.expanded || !g || !g.props || !Array.isArray(g.props.children)) return;
-                            g.props.children[1] = folderIcon(toHex(fp && fp.folderColor));
-                        });
-                    });
-                    return;
-                }
-
-                // older/alternate layout
-                const p = props.children && props.children.props;
-                if (!p || !Array.isArray(p.children) || !p.children[1]) return;
-                const color = safe(() => {
-                    const st = p.children[0].props.style;
-                    return (Array.isArray(st) ? st.find((s) => s && s.backgroundColor) : st).backgroundColor;
-                });
-                p.children[1] = folderIcon(color);
-            });
-
-            safe(() => {
-                if (!res || !res.props || stats.hostAttached > 40) return;
-                const host = h(ColumnHost, { key: "bf-column-host" });
-                const ch = res.props.children;
-                if (Array.isArray(ch)) {
-                    if (!ch.some((c) => c && c.key === "bf-column-host")) res.props.children = [...ch, host];
-                } else if (ch !== undefined) {
-                    res.props.children = [ch, host];
-                } else {
-                    return;
-                }
-                stats.hostAttached++;
-                stats.attachMode = Array.isArray(ch) ? "array" : typeof ch;
-            });
-            return res;
+            if (!diag.barTree) diag.barTree = outline(res).slice(0, 12).join("\n");
+            if (!res) return res;
+            stats.hostAttached++;
+            stats.attachMode = "GuildsBar";
+            return h(React.Fragment, null, res, h(ColumnHost, { key: "bf-column-host" }));
         });
-        unpatches.push(un);
-        status.hideIcons = "hooked (GuildContainer found)";
-        if (status.autoCollapse === "ok") status.column = "ok";
+        if (unBar) unpatches.push(unBar);
+        status.column = unBar ? (status.autoCollapse === "ok" ? "ok (GuildsBar hooked)" : status.autoCollapse) : "failed: couldn't patch GuildsBar";
+
+        // 2) hide icons in collapsed folders
+        const unFolder = folderMod && folderMod.default
+            ? patchComponent(folderMod.default, ([props], res) => {
+                  safe(() => {
+                      if (!diag.folderProps) diag.folderProps = Object.keys(props || {}).join(",");
+                      if (!diag.folderTree) diag.folderTree = outline(res).join("\n");
+                      if (!storage.hideIcons || !res) return;
+                      const fid = pick(safe(() => props.folderNode.id), safe(() => props.folder.folderId), safe(() => props.folderId), safe(() => props.node.id));
+                      const expanded = pick(props.expanded, props.isExpanded, fid != null ? isExpanded(fid) : false);
+                      if (expanded) return;
+                      const folder = fid != null ? getFolder(fid) : null;
+                      const color = toHex(pick(folder ? folder.folderColor : undefined, safe(() => props.folderNode.color), safe(() => props.folderColor)));
+                      const ok = hideInTree(res, color, iconTypes);
+                      diag.hideResult = ok ? "replaced" : "no icon group in output";
+                      if (ok) stats.previewPatched++;
+                  });
+                  return res;
+              })
+            : null;
+        if (unFolder) unpatches.push(unFolder);
+        status.hideIcons = unFolder ? "hooked (GuildsBarGuildFolder)" : "failed: folder component not found";
         return true;
     }
+    let barWidth = 64;
 
     let retryTimer = null;
     let stopped = false;
@@ -380,6 +457,7 @@
             });
             out.push(`${id} ${path} [${desc}]`);
         }
+        out.unshift(`--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
         return `BetterFolders ${VERSION} scan: ${out.length} matches (${withPath}/${total} modules have paths)\n` + (out.slice(0, 120).join("\n") || "nothing found");
     }
 
@@ -452,7 +530,7 @@
             storage.column
                 ? h(Stepper, {
                       label: "Column position",
-                      value: typeof storage.columnLeft === "number" ? storage.columnLeft : 64,
+                      value: typeof storage.columnLeft === "number" ? storage.columnLeft : barWidth,
                       onChange: (v) => set("columnLeft")(Math.max(0, Math.min(200, v))),
                   })
                 : null,
