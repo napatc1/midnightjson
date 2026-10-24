@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.4.0";
+    const VERSION = "1.4.1";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -382,6 +382,49 @@
         return replaced;
     }
 
+    // Mount the column host on the chat view. Kettu patches this same component for theme
+    // backgrounds; its render is looked up on every draw, so it works mid-session.
+    let msgHooked = false;
+    function hookMessages() {
+        if (msgHooked) return true;
+        const msgMod = modByPath(PATHS.messages);
+        const msg = msgMod && msgMod.default;
+        if (!msg) {
+            stats.msgHook = "waiting: chat view not loaded yet";
+            return false;
+        }
+        const onMsg = (args, res) => {
+            stats.msgRenders = (stats.msgRenders || 0) + 1;
+            if (!res) return res;
+            stats.hostAttached++;
+            stats.attachMode = "Messages";
+            return h(React.Fragment, null, res, h(ColumnHost, { key: "bf-column-host" }));
+        };
+        let unMsg = null, how = "failed";
+        if (typeof msg.render === "function") { unMsg = patcher.after("render", msg, onMsg); how = "render"; }
+        else if (msg.prototype && typeof msg.prototype.render === "function") { unMsg = patcher.after("render", msg.prototype, onMsg); how = "prototype"; }
+        else if (msg.type && typeof msg.type.render === "function") { unMsg = patcher.after("render", msg.type, onMsg); how = "memo.render"; }
+        else { unMsg = patchComponent(msg, onMsg); how = unMsg ? "component" : `failed (${typeof msg}, keys ${safe(() => Object.keys(msg).join(","), "")})`; }
+        if (!unMsg) {
+            stats.msgHook = how;
+            return false;
+        }
+        unpatches.push(unMsg);
+        stats.msgHook = how;
+        msgHooked = true;
+        return true;
+    }
+
+    let msgTimer = null;
+    function hookMessagesWhenReady() {
+        let tries = 0;
+        const attempt = () => {
+            if (stopped || safe(hookMessages, false)) return;
+            if (++tries < 300) msgTimer = setTimeout(attempt, 1000);
+        };
+        attempt();
+    }
+
     function startGuildContainerPatch() {
         const barMod = modByPath(PATHS.bar);
         if (!barMod || !barMod.default) {
@@ -403,26 +446,6 @@
 
         const width = safe(() => modByPath(PATHS.consts).GUILD_LIST_WIDTH);
         if (typeof width === "number") barWidth = width;
-
-        // 0) mount the column host on the chat view. Kettu patches this same component for
-        //    theme backgrounds; its render is looked up on every draw, so it works mid-session.
-        const msgMod = modByPath(PATHS.messages);
-        const msg = msgMod && msgMod.default;
-        if (msg) {
-            const onMsg = (args, res) => {
-                stats.msgRenders = (stats.msgRenders || 0) + 1;
-                if (!res) return res;
-                stats.hostAttached++;
-                stats.attachMode = "Messages";
-                return h(React.Fragment, null, res, h(ColumnHost, { key: "bf-column-host" }));
-            };
-            let unMsg = null;
-            if (typeof msg.render === "function") unMsg = patcher.after("render", msg, onMsg);
-            else if (msg.prototype && typeof msg.prototype.render === "function") unMsg = patcher.after("render", msg.prototype, onMsg);
-            else unMsg = patchComponent(msg, onMsg);
-            if (unMsg) unpatches.push(unMsg);
-            stats.msgHook = unMsg ? (typeof msg.render === "function" ? "render" : msg.prototype && msg.prototype.render ? "prototype" : "component") : "failed";
-        } else stats.msgHook = "Messages not found";
 
         // 1) mount the column host next to the server bar
         const unBar = patchComponent(barMod.default, (args, res) => {
@@ -515,10 +538,11 @@
 
     // ── scanner: list Discord modules related to guild folders ────────────
     function scanDiscord() {
+        safe(hookMessages);
         const mods = safe(() => vendetta.metro.modules || window.modules, {}) || {};
         const out = [];
         let total = 0, withPath = 0;
-        const RX = /folder|guilds?_?bar|guild_?list|guilds?nav|guildsidebar|server_?list|guild_?item|guildicon|home_drawer/i;
+        const RX = /folder|guilds?_?bar|guild_?list|guilds?nav|guildsidebar|server_?list|guild_?item|guildicon|home_drawer|messages\/native\/Messages/i;
         for (const id in mods) {
             total++;
             const m = mods[id];
@@ -658,6 +682,8 @@
             safe(startFolderEvents);
             stopped = false;
             stats.preloaded = safe(preloadKnownModules, 0);
+            msgHooked = false;
+            hookMessagesWhenReady();
             patchWhenReady();
             // if the bar was already on screen when we hooked it, React keeps the old version until a reload
             setTimeout(() => {
@@ -678,6 +704,7 @@
         onUnload() {
             stopped = true;
             if (retryTimer) clearTimeout(retryTimer);
+            if (msgTimer) clearTimeout(msgTimer);
             setOpenFolder(null);
             unpatches.splice(0).forEach((u) => safe(u));
             setTimeout(refreshFolders, 100);
