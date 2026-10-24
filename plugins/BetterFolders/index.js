@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.1.2";
+    const VERSION = "1.1.3";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -352,6 +352,49 @@
         attempt();
     }
 
+    // ── scanner: list Discord modules related to guild folders ────────────
+    function scanDiscord() {
+        const found = new Map(); // label -> count
+        const nameOf = (f) => f && (f.displayName || f.name || (f.type && (f.type.displayName || f.type.name)) || (f.render && (f.render.displayName || f.render.name)));
+        const RX = /folder|guildsbar|guildlist|guildsnav|guildbar|guildicon|guilditem|serverlist/i;
+        const add = (label) => found.set(label, (found.get(label) || 0) + 1);
+        const inspect = (m, path) => {
+            if (!m || (typeof m !== "object" && typeof m !== "function")) return;
+            const n = nameOf(m);
+            if (n && RX.test(n)) add(`${path}fn:${n}`);
+            if (typeof m === "object") {
+                let keys = [];
+                try { keys = Object.keys(m); } catch (e) {}
+                if (keys.length > 300) return;
+                const hits = keys.filter((k) => RX.test(k));
+                if (hits.length) add(`${path}props:{${hits.slice(0, 8).join(",")}}${keys.length > hits.length ? ` +${keys.length - hits.length} more` : ""}`);
+                for (const k of hits.slice(0, 8)) {
+                    const v = safe(() => m[k]);
+                    const vn = nameOf(v);
+                    if (vn && vn !== k) add(`${path}${k}=fn:${vn}`);
+                }
+            }
+        };
+        safe(() =>
+            metro.findAll((m) => {
+                safe(() => {
+                    inspect(m, "");
+                    if (m && m.default && m.default !== m) inspect(m.default, "default.");
+                });
+                return false;
+            }),
+        );
+        // also probe a few likely names directly
+        for (const n of ["GuildFolder", "GuildFolderPreview", "GuildsBar", "GuildsBarItem", "GuildFolderIcon", "GuildFolderComponent", "FolderIcon"]) {
+            const r = safe(() => metro.findByName(n, false));
+            if (r) add(`findByName:${n} ✓`);
+            const d = safe(() => metro.findByDisplayName(n, false));
+            if (d) add(`findByDisplayName:${n} ✓`);
+        }
+        const lines = [...found.entries()].slice(0, 150).map(([k, c]) => (c > 1 ? `${k} ×${c}` : k));
+        return `BetterFolders ${VERSION} scan (${lines.length} hits)\n` + (lines.join("\n") || "nothing found");
+    }
+
     // ── settings page (plain React Native, no internal helpers) ───────────
     function Row({ label, sub, value, onChange }) {
         return h(
@@ -391,6 +434,16 @@
 
     function Settings() {
         const [, force] = React.useReducer((x) => x + 1, 0);
+        const [scan, setScan] = React.useState(null);
+        const runScan = () => {
+            const out = safe(scanDiscord, "scan failed");
+            setScan(out);
+            const ok = safe(() => {
+                metro.common.clipboard.setString(out);
+                return true;
+            }, false);
+            toast(ok ? "Scan copied to clipboard - paste it to Claude" : "Scan done - screenshot the list");
+        };
         const set = (key) => (v) => {
             storage[key] = v;
             if (key === "hideIcons") setTimeout(refreshFolders, 100);
@@ -434,6 +487,15 @@
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
             line(`renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
+            h(
+                Pressable,
+                {
+                    onPress: runScan,
+                    style: { margin: 16, padding: 14, borderRadius: 12, backgroundColor: COLORS.selected, alignItems: "center" },
+                },
+                h(Text, { style: { color: "#FFFFFF", fontSize: 16, fontWeight: "700" } }, "Scan Discord (copies result)"),
+            ),
+            scan ? h(Text, { selectable: true, style: { color: COLORS.sub, fontSize: 11, paddingHorizontal: 16, paddingBottom: 40, fontFamily: "Menlo" } }, scan) : null,
         );
     }
 
