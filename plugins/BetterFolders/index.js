@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.1.1";
+    const VERSION = "1.1.2";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -113,6 +113,7 @@
     };
 
     // ── feature 1: tap handling (auto collapse / folder column) ───────────
+    let warnedNoHost = false;
     function startFolderEvents() {
         if (!ExpandedStore) return (status.autoCollapse = status.column = "failed: ExpandedGuildFolderStore not found");
         if (!getFolders()) return (status.autoCollapse = status.column = "failed: folder list not found");
@@ -122,13 +123,15 @@
             // wait a tick so the store has applied this toggle
             setTimeout(() => {
                 safe(() => {
-                    if (storage.column) {
+                    if (storage.column && stats.hostMounted) {
                         // keep the folder closed in the main list, show its servers in the column instead
                         if (isExpanded(thisId)) toggle(thisId);
                         setOpenFolder(openFolderId === thisId ? null : thisId);
-                        if (!stats.hostMounted)
-                            toast(`BetterFolders: column can't show yet (renders ${stats.renders}, attached ${stats.hostAttached}, mode ${stats.attachMode})`);
                         return;
+                    }
+                    if (storage.column && !warnedNoHost) {
+                        warnedNoHost = true;
+                        toast(`BetterFolders: column not ready, opening normally (gc ${status.hideIcons.startsWith("hooked") ? "found" : "missing"}, renders ${stats.renders}, attached ${stats.hostAttached})`);
                     }
                     if (!storage.autoCollapse || !isExpanded(thisId)) return;
                     (getFolders() || [])
@@ -271,9 +274,9 @@
         const mods = safe(() => metro.findByPropsAll("GuildContainer"), []);
         const mod = mods && mods.length ? mods[mods.length - 1] : null;
         if (!mod) {
-            status.hideIcons = "failed: GuildContainer not found";
-            status.column = "failed: nowhere to mount (GuildContainer not found)";
-            return;
+            status.hideIcons = "waiting: GuildContainer not loaded yet";
+            status.column = "waiting: GuildContainer not loaded yet";
+            return false;
         }
 
         const un = patcher.after("GuildContainer", mod, ([props], res) => {
@@ -322,7 +325,31 @@
         });
         unpatches.push(un);
         status.hideIcons = "hooked (GuildContainer found)";
-        if (status.column === "not started" || status.column === "ok?") status.column = "ok";
+        if (status.autoCollapse === "ok") status.column = "ok";
+        return true;
+    }
+
+    let retryTimer = null;
+    let stopped = false;
+    function patchWhenReady() {
+        let tries = 0;
+        const attempt = () => {
+            if (stopped) return;
+            tries++;
+            if (safe(startGuildContainerPatch, false)) {
+                setTimeout(refreshFolders, 200);
+                if (tries > 1) toast(`BetterFolders ${VERSION} | hooked after ${tries}s | column: ${status.column}`);
+                return;
+            }
+            if (tries >= 120) {
+                status.hideIcons = "failed: GuildContainer not found after 2 min";
+                status.column = "failed: nowhere to mount (GuildContainer not found)";
+                toast(`BetterFolders: ${status.column}`);
+                return;
+            }
+            retryTimer = setTimeout(attempt, 1000);
+        };
+        attempt();
     }
 
     // ── settings page (plain React Native, no internal helpers) ───────────
@@ -416,7 +443,8 @@
             if (storage.autoCollapse === undefined) storage.autoCollapse = true;
             if (storage.column === undefined) storage.column = true;
             safe(startFolderEvents);
-            safe(startGuildContainerPatch);
+            stopped = false;
+            patchWhenReady();
             if (status.autoCollapse !== "ok") status.column = status.autoCollapse;
             setTimeout(() => {
                 // start with every folder closed so the column is the only way folders open
@@ -429,6 +457,8 @@
             toast(msg);
         },
         onUnload() {
+            stopped = true;
+            if (retryTimer) clearTimeout(retryTimer);
             setOpenFolder(null);
             unpatches.splice(0).forEach((u) => safe(u));
             setTimeout(refreshFolders, 100);
