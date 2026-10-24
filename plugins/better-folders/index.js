@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.2.0";
+    const VERSION = "1.2.1";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -265,13 +265,36 @@
         guild: "modules/guilds_bar/native/GuildsBarGuild.tsx",
         pressable: "modules/guilds_bar/native/GuildsBarItemIconPressable.tsx",
     };
+    const allMods = () => safe(() => vendetta.metro.modules || window.modules, {}) || {};
     function modByPath(path) {
-        const mods = safe(() => vendetta.metro.modules || window.modules, {}) || {};
+        const mods = allMods();
+        // fast path: id remembered from a previous run
+        const known = storage.ids && storage.ids[path];
+        if (known != null && mods[known] && mods[known].__filePath === path)
+            return safe(() => mods[known].publicModule.exports, null);
         for (const id in mods) {
             const m = mods[id];
-            if (m && m.__filePath === path) return safe(() => m.publicModule.exports, null);
+            if (m && m.__filePath === path) {
+                if (!storage.ids) storage.ids = {};
+                storage.ids[path] = Number(id);
+                return safe(() => m.publicModule.exports, null);
+            }
         }
         return null;
+    }
+
+    // Load remembered modules early so we can patch them before Discord first draws the server bar.
+    function preloadKnownModules() {
+        if (!storage.ids) return 0;
+        let n = 0;
+        for (const path in storage.ids) {
+            const id = storage.ids[path];
+            const m = allMods()[id];
+            if (!m) continue;
+            if (!m.isInitialized) safe(() => (window.__r ? window.__r(id) : null));
+            if (allMods()[id] && allMods()[id].__filePath === path) n++;
+        }
+        return n;
     }
 
     // patch a component whatever its wrapper is (memo / forwardRef / plain fn)
@@ -457,7 +480,7 @@
             });
             out.push(`${id} ${path} [${desc}]`);
         }
-        out.unshift(`--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
+        out.unshift(`--- preloaded ${stats.preloaded || 0} · bar renders ${stats.renders} · ids ${JSON.stringify(storage.ids || {})}`, `--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
         return `BetterFolders ${VERSION} scan: ${out.length} matches (${withPath}/${total} modules have paths)\n` + (out.slice(0, 120).join("\n") || "nothing found");
     }
 
@@ -552,7 +575,7 @@
             line(`Open server via: ${status.nav}`),
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
-            line(`renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
+            line(`preloaded ${stats.preloaded || 0} · renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             h(
                 Pressable,
                 {
@@ -572,7 +595,13 @@
             if (storage.column === undefined) storage.column = true;
             safe(startFolderEvents);
             stopped = false;
+            stats.preloaded = safe(preloadKnownModules, 0);
             patchWhenReady();
+            // if the bar was already on screen when we hooked it, React keeps the old version until a reload
+            setTimeout(() => {
+                if (!stopped && stats.renders === 0 && status.column.startsWith("ok"))
+                    toast("BetterFolders: reload Discord once to finish setup (Settings → Kettu → Reload Discord)");
+            }, 4000);
             if (status.autoCollapse !== "ok") status.column = status.autoCollapse;
             setTimeout(() => {
                 // start with every folder closed so the column is the only way folders open
