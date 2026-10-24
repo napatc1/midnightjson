@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.4.1";
+    const VERSION = "1.5.0";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -123,10 +123,11 @@
             // wait a tick so the store has applied this toggle
             setTimeout(() => {
                 safe(() => {
-                    if (storage.column && stats.hostMounted) {
+                    if (storage.column && (stats.hostMounted || stats.alertMode !== "failed")) {
                         // keep the folder closed in the main list, show its servers in the column instead
                         if (isExpanded(thisId)) toggle(thisId);
-                        setOpenFolder(openFolderId === thisId ? null : thisId);
+                        if (stats.hostMounted) setOpenFolder(openFolderId === thisId ? null : thisId);
+                        else if (!openAlertColumn(thisId) && isExpanded(thisId) === false) toggle(thisId); // reopen normally if the pop-up failed
                         return;
                     }
                     if (storage.column && !warnedNoHost) {
@@ -149,7 +150,7 @@
     const iconUrl = (g) =>
         g && g.icon ? `https://cdn.discordapp.com/icons/${g.id}/${g.icon}.png?size=96` : null;
 
-    function GuildTile({ id, selected }) {
+    function GuildTile({ id, selected, onClose }) {
         const g = safe(() => GuildStore.getGuild(id), null);
         if (!g) return null;
         const url = iconUrl(g);
@@ -158,8 +159,8 @@
             Pressable,
             {
                 onPress: () => {
-                    setOpenFolder(null);
-                    setTimeout(() => openGuild(id), 50);
+                    (onClose || (() => setOpenFolder(null)))();
+                    setTimeout(() => openGuild(id), 80);
                 },
                 style: { alignItems: "center", marginVertical: 5 },
             },
@@ -186,6 +187,10 @@
 
     function FolderColumn() {
         const folderId = useOpenFolder();
+        return h(ColumnView, { folderId, onClose: () => setOpenFolder(null) });
+    }
+
+    function ColumnView({ folderId, onClose }) {
         const folder = folderId != null ? getFolder(folderId) : null;
         if (!folder) return null;
         const selectedId = safe(() => SelectedGuildStore.getGuildId(), null);
@@ -196,14 +201,14 @@
             Modal,
             {
                 transparent: true, visible: true, animationType: "fade",
-                onRequestClose: () => setOpenFolder(null),
+                onRequestClose: () => onClose(),
                 supportedOrientations: ["portrait", "landscape"],
             },
             h(
                 View,
                 { style: { flex: 1, flexDirection: "row" } },
                 // tap the server list area to close too
-                h(Pressable, { style: { width: left }, onPress: () => setOpenFolder(null) }),
+                h(Pressable, { style: { width: left }, onPress: () => onClose() }),
                 h(
                     View,
                     {
@@ -220,12 +225,43 @@
                     h(
                         ScrollView,
                         { contentContainerStyle: { paddingVertical: 4 }, showsVerticalScrollIndicator: false },
-                        (folder.guildIds || []).map((id) => h(GuildTile, { key: id, id, selected: id === selectedId })),
+                        (folder.guildIds || []).map((id) => h(GuildTile, { key: id, id, selected: id === selectedId, onClose })),
                     ),
                 ),
-                h(Pressable, { style: { flex: 1, backgroundColor: "#00000055" }, onPress: () => setOpenFolder(null) }),
+                h(Pressable, { style: { flex: 1, backgroundColor: "#00000055" }, onPress: () => onClose() }),
             ),
         );
+    }
+
+    // Show the column through Kettu's custom alert API: Discord's alert manager is always
+    // mounted, so this works without hooking any part of the server bar.
+    const AlertsMod = safe(() => metro.findByProps("openLazy", "close"));
+    let alertOpenFor = null;
+    function closeAlertColumn() {
+        alertOpenFor = null;
+        safe(() => AlertsMod.close());
+    }
+    function ColumnAlert({ folderId }) {
+        const [open, setOpen] = React.useState(true);
+        if (!open) return null;
+        return h(ColumnView, {
+            folderId,
+            onClose: () => {
+                setOpen(false);
+                closeAlertColumn();
+            },
+        });
+    }
+    function openAlertColumn(folderId) {
+        if (alertOpenFor === folderId) return closeAlertColumn();
+        if (alertOpenFor != null) closeAlertColumn();
+        const ok = safe(() => {
+            vendetta.ui.alerts.showCustomAlert(ColumnAlert, { folderId });
+            return true;
+        }, false);
+        if (ok) alertOpenFor = folderId;
+        stats.alertMode = ok ? "ok" : "failed";
+        return ok;
     }
 
     // Exactly one mounted host renders the column (it lives inside the server list).
@@ -565,7 +601,7 @@
             });
             out.push(`${id} ${path} [${desc}]`);
         }
-        out.unshift(`--- chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · preloaded ${stats.preloaded || 0} · bar renders ${stats.renders} · drawer row renders ${stats.rowRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`, `--- drawer row props: ${diag.rowProps}`, `--- drawer row tree:\n${diag.rowTree}`, `--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
+        out.unshift(`--- popup ${stats.alertMode || "unused"} (alerts api ${AlertsMod ? "found" : "missing"}) · chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · preloaded ${stats.preloaded || 0} · bar renders ${stats.renders} · drawer row renders ${stats.rowRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`, `--- drawer row props: ${diag.rowProps}`, `--- drawer row tree:\n${diag.rowTree}`, `--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
         return `BetterFolders ${VERSION} scan: ${out.length} matches (${withPath}/${total} modules have paths)\n` + (out.slice(0, 120).join("\n") || "nothing found");
     }
 
@@ -660,6 +696,7 @@
             line(`Open server via: ${status.nav}`),
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
+            line(`popup ${stats.alertMode || "unused"} (alerts api ${AlertsMod ? "found" : "missing"})`),
             line(`chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             line(`preloaded ${stats.preloaded || 0} · renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             h(
