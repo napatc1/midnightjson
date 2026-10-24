@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.3.0";
+    const VERSION = "1.4.0";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -265,6 +265,7 @@
         guild: "modules/guilds_bar/native/GuildsBarGuild.tsx",
         pressable: "modules/guilds_bar/native/GuildsBarItemIconPressable.tsx",
         drawerRow: "modules/home_drawer/native/HomeDrawerFolderRow.tsx",
+        messages: "modules/messages/native/Messages.tsx",
     };
     const ID_HINTS = {
         "modules/guilds_bar/native/GuildsBar.tsx": 12999,
@@ -403,6 +404,26 @@
         const width = safe(() => modByPath(PATHS.consts).GUILD_LIST_WIDTH);
         if (typeof width === "number") barWidth = width;
 
+        // 0) mount the column host on the chat view. Kettu patches this same component for
+        //    theme backgrounds; its render is looked up on every draw, so it works mid-session.
+        const msgMod = modByPath(PATHS.messages);
+        const msg = msgMod && msgMod.default;
+        if (msg) {
+            const onMsg = (args, res) => {
+                stats.msgRenders = (stats.msgRenders || 0) + 1;
+                if (!res) return res;
+                stats.hostAttached++;
+                stats.attachMode = "Messages";
+                return h(React.Fragment, null, res, h(ColumnHost, { key: "bf-column-host" }));
+            };
+            let unMsg = null;
+            if (typeof msg.render === "function") unMsg = patcher.after("render", msg, onMsg);
+            else if (msg.prototype && typeof msg.prototype.render === "function") unMsg = patcher.after("render", msg.prototype, onMsg);
+            else unMsg = patchComponent(msg, onMsg);
+            if (unMsg) unpatches.push(unMsg);
+            stats.msgHook = unMsg ? (typeof msg.render === "function" ? "render" : msg.prototype && msg.prototype.render ? "prototype" : "component") : "failed";
+        } else stats.msgHook = "Messages not found";
+
         // 1) mount the column host next to the server bar
         const unBar = patchComponent(barMod.default, (args, res) => {
             stats.renders++;
@@ -520,7 +541,7 @@
             });
             out.push(`${id} ${path} [${desc}]`);
         }
-        out.unshift(`--- preloaded ${stats.preloaded || 0} · bar renders ${stats.renders} · drawer row renders ${stats.rowRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`, `--- drawer row props: ${diag.rowProps}`, `--- drawer row tree:\n${diag.rowTree}`, `--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
+        out.unshift(`--- chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · preloaded ${stats.preloaded || 0} · bar renders ${stats.renders} · drawer row renders ${stats.rowRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`, `--- drawer row props: ${diag.rowProps}`, `--- drawer row tree:\n${diag.rowTree}`, `--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
         return `BetterFolders ${VERSION} scan: ${out.length} matches (${withPath}/${total} modules have paths)\n` + (out.slice(0, 120).join("\n") || "nothing found");
     }
 
@@ -615,6 +636,7 @@
             line(`Open server via: ${status.nav}`),
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
+            line(`chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             line(`preloaded ${stats.preloaded || 0} · renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             h(
                 Pressable,
@@ -639,7 +661,7 @@
             patchWhenReady();
             // if the bar was already on screen when we hooked it, React keeps the old version until a reload
             setTimeout(() => {
-                if (!stopped && stats.renders === 0 && !stats.rowRenders && status.column.startsWith("ok"))
+                if (!stopped && stats.renders === 0 && !stats.rowRenders && !stats.msgRenders && status.column.startsWith("ok"))
                     toast("BetterFolders: reload Discord once to finish setup (Settings → Kettu → Reload Discord)");
             }, 4000);
             if (status.autoCollapse !== "ok") status.column = status.autoCollapse;
