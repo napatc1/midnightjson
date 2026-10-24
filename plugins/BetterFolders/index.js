@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.1.3";
+    const VERSION = "1.1.4";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -354,45 +354,33 @@
 
     // ── scanner: list Discord modules related to guild folders ────────────
     function scanDiscord() {
-        const found = new Map(); // label -> count
-        const nameOf = (f) => f && (f.displayName || f.name || (f.type && (f.type.displayName || f.type.name)) || (f.render && (f.render.displayName || f.render.name)));
-        const RX = /folder|guildsbar|guildlist|guildsnav|guildbar|guildicon|guilditem|serverlist/i;
-        const add = (label) => found.set(label, (found.get(label) || 0) + 1);
-        const inspect = (m, path) => {
-            if (!m || (typeof m !== "object" && typeof m !== "function")) return;
-            const n = nameOf(m);
-            if (n && RX.test(n)) add(`${path}fn:${n}`);
-            if (typeof m === "object") {
-                let keys = [];
-                try { keys = Object.keys(m); } catch (e) {}
-                if (keys.length > 300) return;
-                const hits = keys.filter((k) => RX.test(k));
-                if (hits.length) add(`${path}props:{${hits.slice(0, 8).join(",")}}${keys.length > hits.length ? ` +${keys.length - hits.length} more` : ""}`);
-                for (const k of hits.slice(0, 8)) {
-                    const v = safe(() => m[k]);
-                    const vn = nameOf(v);
-                    if (vn && vn !== k) add(`${path}${k}=fn:${vn}`);
-                }
-            }
-        };
-        safe(() =>
-            metro.findAll((m) => {
-                safe(() => {
-                    inspect(m, "");
-                    if (m && m.default && m.default !== m) inspect(m.default, "default.");
-                });
-                return false;
-            }),
-        );
-        // also probe a few likely names directly
-        for (const n of ["GuildFolder", "GuildFolderPreview", "GuildsBar", "GuildsBarItem", "GuildFolderIcon", "GuildFolderComponent", "FolderIcon"]) {
-            const r = safe(() => metro.findByName(n, false));
-            if (r) add(`findByName:${n} ✓`);
-            const d = safe(() => metro.findByDisplayName(n, false));
-            if (d) add(`findByDisplayName:${n} ✓`);
+        const mods = safe(() => vendetta.metro.modules || window.modules, {}) || {};
+        const out = [];
+        let total = 0, withPath = 0;
+        const RX = /folder|guilds?_?bar|guild_?list|guilds?nav|guildsidebar|server_?list|guild_?item|guildicon/i;
+        for (const id in mods) {
+            total++;
+            const m = mods[id];
+            const path = m && m.__filePath;
+            if (!path) continue;
+            withPath++;
+            if (!RX.test(path)) continue;
+            const exp = safe(() => m.publicModule && m.publicModule.exports);
+            let desc = "";
+            safe(() => {
+                if (!exp) return (desc = "no exports");
+                const keys = Object.keys(exp).slice(0, 12);
+                desc = keys
+                    .map((k) => {
+                        const v = exp[k];
+                        const t = typeof v === "function" ? "fn" : v && typeof v === "object" ? (v.$$typeof ? "memo/fwd" : "obj") : typeof v;
+                        return `${k}:${t}`;
+                    })
+                    .join(",");
+            });
+            out.push(`${id} ${path} [${desc}]`);
         }
-        const lines = [...found.entries()].slice(0, 150).map(([k, c]) => (c > 1 ? `${k} ×${c}` : k));
-        return `BetterFolders ${VERSION} scan (${lines.length} hits)\n` + (lines.join("\n") || "nothing found");
+        return `BetterFolders ${VERSION} scan: ${out.length} matches (${withPath}/${total} modules have paths)\n` + (out.slice(0, 120).join("\n") || "nothing found");
     }
 
     // ── settings page (plain React Native, no internal helpers) ───────────
