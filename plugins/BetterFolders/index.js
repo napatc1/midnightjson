@@ -1,17 +1,23 @@
 (() => {
     "use strict";
     // BetterFolders, rebuilt for Kettu. Original idea and code by fres (fres621/vendetta-plugins).
+    // Folder column inspired by Vencord's BetterFolders.
     // Every lookup is guarded so a missing Discord internal disables one feature
     // instead of crashing the whole plugin.
 
     const { metro, patcher, plugin, logger } = vendetta;
     const { storage } = plugin;
     const { React, ReactNative, FluxDispatcher } = metro.common;
-    const { View, Text, Image, ScrollView, Switch, Pressable } = ReactNative;
+    const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.0.0";
-    const status = { autoCollapse: "not started", hideIcons: "not started" };
+    const VERSION = "1.1.0";
+    const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const unpatches = [];
+
+    const COLORS = {
+        panel: "#171B2B", border: "#4B5B9B33", text: "#E6EAF5", sub: "#8A93AD",
+        selected: "#3673CB", tile: "#1D2135",
+    };
 
     const safe = (fn, fallback) => {
         try {
@@ -22,14 +28,14 @@
         }
     };
 
-    const toast = (msg) =>
-        safe(() => {
-            const icon = safe(() => vendetta.ui.assets.getAssetIDByName("img_guild_folder"));
-            vendetta.ui.toasts.showToast(msg, icon);
-        });
+    const asset = (name) => safe(() => vendetta.ui.assets.getAssetIDByName(name));
+    const toast = (msg) => safe(() => vendetta.ui.toasts.showToast(msg, asset("img_guild_folder")));
+    const h = React.createElement;
 
     // ── store lookups (with fallbacks for renamed stores) ─────────────────
     const ExpandedStore = safe(() => metro.findByStoreName("ExpandedGuildFolderStore"));
+    const GuildStore = safe(() => metro.findByStoreName("GuildStore"));
+    const SelectedGuildStore = safe(() => metro.findByStoreName("SelectedGuildStore"));
     const folderSources = [
         () => metro.findByStoreName("SortedGuildStore"),
         () => metro.findByStoreName("UserSettingsProtoStore"),
@@ -45,8 +51,17 @@
         return null;
     }
 
+    const getFolder = (id) => safe(() => (getFolders() || []).find((f) => f.folderId === id), null);
     const isExpanded = (id) => !!safe(() => ExpandedStore.isFolderExpanded(id), false);
-    const toggle = (folderId) => FluxDispatcher.dispatch({ type: "TOGGLE_GUILD_FOLDER_EXPAND", folderId });
+    let internalToggle = false;
+    const toggle = (folderId) => {
+        internalToggle = true;
+        try {
+            FluxDispatcher.dispatch({ type: "TOGGLE_GUILD_FOLDER_EXPAND", folderId });
+        } finally {
+            internalToggle = false;
+        }
+    };
 
     // Re-render collapsed folders by toggling them twice.
     function refreshFolders() {
@@ -60,24 +75,63 @@
         );
     }
 
-    // ── feature 1: auto collapse ──────────────────────────────────────────
-    function startAutoCollapse() {
-        if (!ExpandedStore) return (status.autoCollapse = "failed: ExpandedGuildFolderStore not found");
-        if (!getFolders()) return (status.autoCollapse = "failed: folder list not found");
+    // ── navigation to a guild (several fallbacks) ─────────────────────────
+    function openGuild(guildId) {
+        const tries = [
+            ["transitionToGuild", () => metro.findByProps("transitionToGuild").transitionToGuild(guildId)],
+            ["transitionToGuildSync", () => metro.findByProps("transitionToGuildSync").transitionToGuildSync(guildId)],
+            ["transitionTo", () => metro.findByProps("transitionTo", "replaceWith").transitionTo(`/channels/${guildId}`)],
+            ["deep link", () => Linking.openURL(`discord://-/channels/${guildId}`)],
+        ];
+        for (const [name, fn] of tries) {
+            try {
+                fn();
+                status.nav = name;
+                return true;
+            } catch (e) {}
+        }
+        status.nav = "failed: no navigation method found";
+        toast("BetterFolders: couldn't open that server");
+        return false;
+    }
 
-        let busy = false;
+    // ── tiny event emitter for the column state ───────────────────────────
+    const listeners = new Set();
+    let openFolderId = null;
+    const setOpenFolder = (id) => {
+        openFolderId = id;
+        listeners.forEach((l) => safe(l));
+    };
+    const useOpenFolder = () => {
+        const [, force] = React.useReducer((x) => x + 1, 0);
+        React.useEffect(() => {
+            listeners.add(force);
+            return () => listeners.delete(force);
+        }, []);
+        return openFolderId;
+    };
+
+    // ── feature 1: tap handling (auto collapse / folder column) ───────────
+    function startFolderEvents() {
+        if (!ExpandedStore) return (status.autoCollapse = status.column = "failed: ExpandedGuildFolderStore not found");
+        if (!getFolders()) return (status.autoCollapse = status.column = "failed: folder list not found");
+
         const onToggle = ({ folderId: thisId }) => {
-            if (busy || !storage.autoCollapse) return;
+            if (internalToggle) return;
             // wait a tick so the store has applied this toggle
             setTimeout(() => {
-                if (!isExpanded(thisId)) return;
-                busy = true;
-                safe(() =>
+                safe(() => {
+                    if (storage.column) {
+                        // keep the folder closed in the main list, show its servers in the column instead
+                        if (isExpanded(thisId)) toggle(thisId);
+                        setOpenFolder(openFolderId === thisId ? null : thisId);
+                        return;
+                    }
+                    if (!storage.autoCollapse || !isExpanded(thisId)) return;
                     (getFolders() || [])
                         .filter((f) => f.folderId && f.folderId !== thisId && isExpanded(f.folderId))
-                        .forEach(({ folderId }) => toggle(folderId)),
-                );
-                busy = false;
+                        .forEach(({ folderId }) => toggle(folderId));
+                });
             }, 0);
         };
         FluxDispatcher.subscribe("TOGGLE_GUILD_FOLDER_EXPAND", onToggle);
@@ -85,9 +139,118 @@
         status.autoCollapse = "ok";
     }
 
-    // ── feature 2: hide server icons in collapsed folders ─────────────────
+    // ── the column itself ─────────────────────────────────────────────────
+    const iconUrl = (g) =>
+        g && g.icon ? `https://cdn.discordapp.com/icons/${g.id}/${g.icon}.png?size=96` : null;
+
+    function GuildTile({ id, selected }) {
+        const g = safe(() => GuildStore.getGuild(id), null);
+        if (!g) return null;
+        const url = iconUrl(g);
+        const initials = (g.name || "?").split(/\s+/).map((w) => w[0]).join("").slice(0, 3);
+        return h(
+            Pressable,
+            {
+                onPress: () => {
+                    setOpenFolder(null);
+                    setTimeout(() => openGuild(id), 50);
+                },
+                style: { alignItems: "center", marginVertical: 5 },
+            },
+            h(View, {
+                style: {
+                    position: "absolute", left: -6, top: 12, width: 4, height: selected ? 24 : 0,
+                    borderRadius: 2, backgroundColor: COLORS.text,
+                },
+            }),
+            url
+                ? h(Image, { source: { uri: url }, style: { width: 48, height: 48, borderRadius: selected ? 16 : 24 } })
+                : h(
+                      View,
+                      {
+                          style: {
+                              width: 48, height: 48, borderRadius: selected ? 16 : 24,
+                              backgroundColor: COLORS.tile, justifyContent: "center", alignItems: "center",
+                          },
+                      },
+                      h(Text, { style: { color: COLORS.text, fontSize: 14, fontWeight: "600" } }, initials),
+                  ),
+        );
+    }
+
+    function FolderColumn() {
+        const folderId = useOpenFolder();
+        const folder = folderId != null ? getFolder(folderId) : null;
+        if (!folder) return null;
+        const selectedId = safe(() => SelectedGuildStore.getGuildId(), null);
+        const left = typeof storage.columnLeft === "number" ? storage.columnLeft : 64;
+        const tint = typeof folder.folderColor === "number" ? "#" + folder.folderColor.toString(16).padStart(6, "0") : COLORS.selected;
+
+        return h(
+            Modal,
+            {
+                transparent: true, visible: true, animationType: "fade",
+                onRequestClose: () => setOpenFolder(null),
+                supportedOrientations: ["portrait", "landscape"],
+            },
+            h(
+                View,
+                { style: { flex: 1, flexDirection: "row" } },
+                // tap the server list area to close too
+                h(Pressable, { style: { width: left }, onPress: () => setOpenFolder(null) }),
+                h(
+                    View,
+                    {
+                        style: {
+                            width: 68, backgroundColor: COLORS.panel, paddingTop: 60, paddingBottom: 30,
+                            borderLeftWidth: 1, borderRightWidth: 1, borderColor: COLORS.border,
+                        },
+                    },
+                    h(Image, {
+                        source: asset("img_guild_folder"),
+                        style: { alignSelf: "center", width: 24, height: 24, tintColor: tint, marginBottom: 8 },
+                    }),
+                    h(View, { style: { height: 1, marginHorizontal: 16, marginBottom: 6, backgroundColor: COLORS.border } }),
+                    h(
+                        ScrollView,
+                        { contentContainerStyle: { paddingVertical: 4 }, showsVerticalScrollIndicator: false },
+                        (folder.guildIds || []).map((id) => h(GuildTile, { key: id, id, selected: id === selectedId })),
+                    ),
+                ),
+                h(Pressable, { style: { flex: 1, backgroundColor: "#00000055" }, onPress: () => setOpenFolder(null) }),
+            ),
+        );
+    }
+
+    // Exactly one mounted host renders the column (it lives inside the server list).
+    let ownerToken = null;
+    const hostListeners = new Set();
+    function ColumnHost() {
+        const token = React.useRef({}).current;
+        const [, force] = React.useReducer((x) => x + 1, 0);
+        React.useEffect(() => {
+            hostListeners.add(force);
+            if (!ownerToken) {
+                ownerToken = token;
+                force();
+            }
+            return () => {
+                hostListeners.delete(force);
+                if (ownerToken === token) {
+                    ownerToken = null;
+                    hostListeners.forEach((l) => safe(l));
+                }
+            };
+        }, []);
+        React.useEffect(() => {
+            if (!ownerToken) ownerToken = token;
+        });
+        return ownerToken === token && storage.column ? h(FolderColumn) : null;
+    }
+
+    // ── feature 2: GuildContainer patch (hide icons + mount the column host) ──
     const folderIcon = (tint) =>
-        React.createElement(
+        h(
             View,
             {
                 style: {
@@ -95,18 +258,19 @@
                     justifyContent: "center", alignItems: "center",
                 },
             },
-            React.createElement(Image, {
-                source: safe(() => vendetta.ui.assets.getAssetIDByName("img_guild_folder")),
-                style: tint ? { tintColor: tint } : {},
-            }),
+            h(Image, { source: asset("img_guild_folder"), style: tint ? { tintColor: tint } : {} }),
         );
 
     const toHex = (n) => (typeof n === "number" ? "#" + n.toString(16).padStart(6, "0") : n);
 
-    function startHideIcons() {
+    function startGuildContainerPatch() {
         const mods = safe(() => metro.findByPropsAll("GuildContainer"), []);
         const mod = mods && mods.length ? mods[mods.length - 1] : null;
-        if (!mod) return (status.hideIcons = "failed: GuildContainer not found");
+        if (!mod) {
+            status.hideIcons = "failed: GuildContainer not found";
+            status.column = "failed: nowhere to mount (GuildContainer not found)";
+            return;
+        }
 
         const un = patcher.after("GuildContainer", mod, ([props], res) => {
             safe(() => {
@@ -133,27 +297,49 @@
                 });
                 p.children[1] = folderIcon(color);
             });
-            return res;
+
+            if (!res) return res;
+            return h(React.Fragment, null, res, h(ColumnHost, { key: "bf-column-host" }));
         });
         unpatches.push(un);
         status.hideIcons = "hooked (GuildContainer found)";
+        if (status.column === "not started" || status.column === "ok?") status.column = "ok";
     }
 
     // ── settings page (plain React Native, no internal helpers) ───────────
     function Row({ label, sub, value, onChange }) {
-        return React.createElement(
+        return h(
             Pressable,
             {
                 onPress: () => onChange(!value),
                 style: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 14 },
             },
-            React.createElement(
+            h(
                 View,
                 { style: { flex: 1, paddingRight: 12 } },
-                React.createElement(Text, { style: { color: "#E6EAF5", fontSize: 16, fontWeight: "600" } }, label),
-                React.createElement(Text, { style: { color: "#8A93AD", fontSize: 13, marginTop: 2 } }, sub),
+                h(Text, { style: { color: COLORS.text, fontSize: 16, fontWeight: "600" } }, label),
+                h(Text, { style: { color: COLORS.sub, fontSize: 13, marginTop: 2 } }, sub),
             ),
-            React.createElement(Switch, { value, onValueChange: onChange }),
+            h(Switch, { value, onValueChange: onChange }),
+        );
+    }
+
+    function Stepper({ label, value, onChange }) {
+        const btn = (t, d) =>
+            h(
+                Pressable,
+                {
+                    onPress: () => onChange(value + d),
+                    style: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, backgroundColor: COLORS.tile, marginLeft: 8 },
+                },
+                h(Text, { style: { color: COLORS.text, fontSize: 16 } }, t),
+            );
+        return h(
+            View,
+            { style: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 10 } },
+            h(Text, { style: { flex: 1, color: COLORS.text, fontSize: 15 } }, `${label}: ${value}`),
+            btn("−", -4),
+            btn("+", 4),
         );
     }
 
@@ -162,28 +348,43 @@
         const set = (key) => (v) => {
             storage[key] = v;
             if (key === "hideIcons") setTimeout(refreshFolders, 100);
+            if (key === "column" && !v) setOpenFolder(null);
             force();
         };
-        const line = (t) =>
-            React.createElement(Text, { style: { color: "#8A93AD", fontSize: 12, paddingHorizontal: 16, marginTop: 4 } }, t);
+        const line = (t) => h(Text, { style: { color: COLORS.sub, fontSize: 12, paddingHorizontal: 16, marginTop: 4 } }, t);
 
-        return React.createElement(
+        return h(
             ScrollView,
             { style: { flex: 1, paddingTop: 10 } },
-            React.createElement(Row, {
+            h(Row, {
+                label: "Folder column",
+                sub: "Open folders in a separate column next to the server list (like Vencord).",
+                value: !!storage.column,
+                onChange: set("column"),
+            }),
+            storage.column
+                ? h(Stepper, {
+                      label: "Column position",
+                      value: typeof storage.columnLeft === "number" ? storage.columnLeft : 64,
+                      onChange: (v) => set("columnLeft")(Math.max(0, Math.min(200, v))),
+                  })
+                : null,
+            h(Row, {
                 label: "Auto collapse",
-                sub: "Close other folders when you open one.",
+                sub: "Close other folders when you open one (when the column is off).",
                 value: !!storage.autoCollapse,
                 onChange: set("autoCollapse"),
             }),
-            React.createElement(Row, {
+            h(Row, {
                 label: "Hide icons",
                 sub: "Show a plain folder icon instead of server icons in collapsed folders.",
                 value: !!storage.hideIcons,
                 onChange: set("hideIcons"),
             }),
-            React.createElement(View, { style: { height: 16 } }),
+            h(View, { style: { height: 16 } }),
             line(`BetterFolders ${VERSION} diagnostics`),
+            line(`Folder column: ${status.column}`),
+            line(`Open server via: ${status.nav}`),
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
         );
@@ -193,14 +394,22 @@
         onLoad() {
             if (storage.hideIcons === undefined) storage.hideIcons = true;
             if (storage.autoCollapse === undefined) storage.autoCollapse = true;
-            safe(startAutoCollapse);
-            safe(startHideIcons);
-            setTimeout(refreshFolders, 300);
-            const msg = `BetterFolders ${VERSION} | collapse: ${status.autoCollapse} | icons: ${status.hideIcons}`;
+            if (storage.column === undefined) storage.column = true;
+            safe(startFolderEvents);
+            safe(startGuildContainerPatch);
+            if (status.autoCollapse !== "ok") status.column = status.autoCollapse;
+            setTimeout(() => {
+                // start with every folder closed so the column is the only way folders open
+                if (storage.column)
+                    safe(() => (getFolders() || []).forEach((f) => f.folderId && isExpanded(f.folderId) && toggle(f.folderId)));
+                refreshFolders();
+            }, 300);
+            const msg = `BetterFolders ${VERSION} | column: ${status.column} | icons: ${status.hideIcons}`;
             safe(() => logger.log(msg));
             toast(msg);
         },
         onUnload() {
+            setOpenFolder(null);
             unpatches.splice(0).forEach((u) => safe(u));
             setTimeout(refreshFolders, 100);
         },
