@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.2.1";
+    const VERSION = "1.2.2";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -265,11 +265,20 @@
         guild: "modules/guilds_bar/native/GuildsBarGuild.tsx",
         pressable: "modules/guilds_bar/native/GuildsBarItemIconPressable.tsx",
     };
+    const ID_HINTS = {
+        "modules/guilds_bar/native/GuildsBar.tsx": 12999,
+        "modules/guilds_bar/native/GuildsBarGuildFolder.tsx": 13011,
+        "modules/guilds_bar/native/GuildsBarConstants.tsx": 13002,
+        "uikit-native/GuildIcon.tsx": 5954,
+        "design/components/Pile/native/GuildIconPile.native.tsx": 10945,
+        "modules/guilds_bar/native/GuildsBarGuild.tsx": 13035,
+        "modules/guilds_bar/native/GuildsBarItemIconPressable.tsx": 13062,
+    };
     const allMods = () => safe(() => vendetta.metro.modules || window.modules, {}) || {};
     function modByPath(path) {
         const mods = allMods();
         // fast path: id remembered from a previous run
-        const known = storage.ids && storage.ids[path];
+        const known = (storage.ids && storage.ids[path]) != null ? storage.ids[path] : ID_HINTS[path];
         if (known != null && mods[known] && mods[known].__filePath === path)
             return safe(() => mods[known].publicModule.exports, null);
         for (const id in mods) {
@@ -285,10 +294,10 @@
 
     // Load remembered modules early so we can patch them before Discord first draws the server bar.
     function preloadKnownModules() {
-        if (!storage.ids) return 0;
+        const ids = Object.assign({}, ID_HINTS, storage.ids || {});
         let n = 0;
-        for (const path in storage.ids) {
-            const id = storage.ids[path];
+        for (const path in ids) {
+            const id = ids[path];
             const m = allMods()[id];
             if (!m) continue;
             if (!m.isInitialized) safe(() => (window.__r ? window.__r(id) : null));
