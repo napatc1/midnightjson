@@ -10,8 +10,9 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.1.0";
+    const VERSION = "1.1.1";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
+    const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
 
     const COLORS = {
@@ -125,6 +126,8 @@
                         // keep the folder closed in the main list, show its servers in the column instead
                         if (isExpanded(thisId)) toggle(thisId);
                         setOpenFolder(openFolderId === thisId ? null : thisId);
+                        if (!stats.hostMounted)
+                            toast(`BetterFolders: column can't show yet (renders ${stats.renders}, attached ${stats.hostAttached}, mode ${stats.attachMode})`);
                         return;
                     }
                     if (!storage.autoCollapse || !isExpanded(thisId)) return;
@@ -230,6 +233,7 @@
         const [, force] = React.useReducer((x) => x + 1, 0);
         React.useEffect(() => {
             hostListeners.add(force);
+            stats.hostMounted = true;
             if (!ownerToken) {
                 ownerToken = token;
                 force();
@@ -273,6 +277,7 @@
         }
 
         const un = patcher.after("GuildContainer", mod, ([props], res) => {
+            stats.renders++;
             safe(() => {
                 if (!storage.hideIcons || !props || props.expanded) return;
                 const Preview = props.children && props.children.type;
@@ -280,6 +285,7 @@
                 if (Preview && Preview.type) {
                     const once = patcher.after("type", Preview, ([fp], g) => {
                         once();
+                        stats.previewPatched++;
                         safe(() => {
                             if (props.expanded || !g || !g.props || !Array.isArray(g.props.children)) return;
                             g.props.children[1] = folderIcon(toHex(fp && fp.folderColor));
@@ -298,8 +304,21 @@
                 p.children[1] = folderIcon(color);
             });
 
-            if (!res) return res;
-            return h(React.Fragment, null, res, h(ColumnHost, { key: "bf-column-host" }));
+            safe(() => {
+                if (!res || !res.props || stats.hostAttached > 40) return;
+                const host = h(ColumnHost, { key: "bf-column-host" });
+                const ch = res.props.children;
+                if (Array.isArray(ch)) {
+                    if (!ch.some((c) => c && c.key === "bf-column-host")) res.props.children = [...ch, host];
+                } else if (ch !== undefined) {
+                    res.props.children = [ch, host];
+                } else {
+                    return;
+                }
+                stats.hostAttached++;
+                stats.attachMode = Array.isArray(ch) ? "array" : typeof ch;
+            });
+            return res;
         });
         unpatches.push(un);
         status.hideIcons = "hooked (GuildContainer found)";
@@ -387,6 +406,7 @@
             line(`Open server via: ${status.nav}`),
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
+            line(`renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
         );
     }
 
