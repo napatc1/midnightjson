@@ -11,7 +11,7 @@
     const { View, Text, ScrollView, Pressable, StyleSheet } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "0.2.0";
+    const VERSION = "0.2.1";
     const RX = /(channel_list|guild_sidebar\/native|messages\/native\/(Messages|Chat)|chat_input|chat\/native|home\/native|home_drawer\/native\/HomeDrawer(?!FolderRow|GuildRow)|private_channels|main_tabs|tabs_v2|bottom_tabs|navigation\/native|guilds_bar\/native\/GuildsBar\.tsx|user_profile\/native\/UserPanel|panels\/native|you_tab|notifications\/native\/Notifications|channel\/native\/Channel)/i;
 
     const safe = (fn, fb) => {
@@ -222,7 +222,8 @@
                 if (!lookDiag.inputRoot) lookDiag.inputRoot = describeRoot(res);
                 if (!on("roundInput") || !res || !res.props) return;
                 res.props.style = [res.props.style, {
-                    marginHorizontal: MID.gap, marginBottom: 4, borderRadius: MID.radius, overflow: "hidden",
+                    // no overflow:hidden here - the chat box can contain reply bars and suggestion pop-ups
+                    marginHorizontal: MID.gap, marginBottom: 4, borderRadius: MID.radius,
                     backgroundColor: MID.frame, borderWidth: 1, borderColor: MID.border,
                 }];
             });
