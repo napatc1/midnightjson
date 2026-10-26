@@ -1,8 +1,15 @@
 {
   "name": "Midnight Layout",
-  "description": "Step 1 of midnight's rounded, floating-panel look: finds which screens Discord draws on this phone.",
-  "authors": [{ "name": "napatc1", "id": "0" }],
+  "description": "midnight's rounded, floating-panel look for Kettu: rounded chat panel and message box (more coming).",
+  "authors": [
+    {
+      "name": "napatc1",
+      "id": "0"
+    }
+  ],
   "main": "index.js",
-  "hash": "c03f6e280b12cf7ab42eef8c0c361e43696dfa6bbe40035475f8f1d2d3916762",
-  "vendetta": { "icon": "ic_theme_24px" }
+  "hash": "ad867dc84f3be600f446f90c4573151f04ea6be68bb6bca8380140be6109aa9c",
+  "vendetta": {
+    "icon": "ic_theme_24px"
+  }
 }

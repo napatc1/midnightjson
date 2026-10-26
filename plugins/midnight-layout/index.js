@@ -11,7 +11,7 @@
     const { View, Text, ScrollView, Pressable, StyleSheet } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "0.1.0";
+    const VERSION = "0.2.0";
     const RX = /(channel_list|guild_sidebar\/native|messages\/native\/(Messages|Chat)|chat_input|chat\/native|home\/native|home_drawer\/native\/HomeDrawer(?!FolderRow|GuildRow)|private_channels|main_tabs|tabs_v2|bottom_tabs|navigation\/native|guilds_bar\/native\/GuildsBar\.tsx|user_profile\/native\/UserPanel|panels\/native|you_tab|notifications\/native\/Notifications|channel\/native\/Channel)/i;
 
     const safe = (fn, fb) => {
@@ -106,7 +106,16 @@
             const d = ReactNative.Dimensions.get("window");
             return `${Math.round(d.width)}x${Math.round(d.height)}`;
         }, "?");
-        return `Midnight Layout ${VERSION} report · screen ${dims} · ${rows.length} hooked, ${rows.filter((r) => r.renders).length} drawn\n` + lines.slice(0, 120).join("\n");
+        return `Midnight Layout ${VERSION} report · screen ${dims} · ${rows.length} hooked, ${rows.filter((r) => r.renders).length} drawn\n` + lookReport() + "\n--- drawn parts:\n" + lines.filter((l) => !l.startsWith("0×")).slice(0, 60).join("\n");
+    }
+
+    function Row({ label, value, onChange }) {
+        return h(
+            Pressable,
+            { onPress: () => onChange(!value), style: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 12 } },
+            h(Text, { style: { flex: 1, color: "#E6EAF5", fontSize: 16, fontWeight: "600" } }, label),
+            h(ReactNative.Switch, { value, onValueChange: onChange }),
+        );
     }
 
     function Settings() {
@@ -124,8 +133,11 @@
             h(
                 Text,
                 { style: { color: "#8592AD", fontSize: 14, padding: 16, lineHeight: 20 } },
-                "Step 1 of the midnight look. Use the app normally for a minute: open the server list, a server's channel list, a chat, your DMs, Notifications and the You tab. Then come back here and tap Copy report, and paste it to Claude.",
+                "Midnight look, step 2: rounded chat panel and message box. Open a server's channel list and a chat, then tap Copy report and paste it to Claude so the server bar and channel list can be rounded next.",
             ),
+            h(Row, { label: "Rounded chat panel", value: on("roundChat"), onChange: (v) => { storage.roundChat = v; force(); } }),
+            h(Row, { label: "Rounded message box", value: on("roundInput"), onChange: (v) => { storage.roundInput = v; force(); } }),
+            h(Text, { style: { color: "#576175", fontSize: 12, paddingHorizontal: 16 } }, "Changes show the next time each screen redraws (open another channel)."),
             btn("Copy report", () => {
                 sweep();
                 const r = report();
@@ -146,6 +158,123 @@
         );
     }
 
+    // ── step 2: midnight look ─────────────────────────────────────────────
+    const MID = { frame: "#1C1F26", panel: "#16181D", raised: "#2B303B", border: "#53607A33", gap: 8, radius: 16 };
+    const LOOK = {
+        chat: "modules/chat/native/ChatViewWrapper.tsx",
+        input: "modules/chat_input/native/ChatInput.tsx",
+        layout: "modules/main_tabs_v2/native/shared_components/guild_channels/layouts/ChannelListLayout.tsx",
+    };
+    const lookStatus = { chat: "not started", input: "not started", layout: "not started" };
+    const lookDiag = { layoutStyles: "", inputRoot: "" };
+    const lookUnpatches = [];
+    const on = (k) => storage[k] !== false;
+
+    function exportsByPath(path) {
+        const mods = safe(() => vendetta.metro.modules || window.modules, {}) || {};
+        for (const id in mods) {
+            const m = mods[id];
+            if (m && m.__filePath === path) return safe(() => m.publicModule.exports, null);
+        }
+        return null;
+    }
+
+    // rounded floating panel: frame-coloured padding around a rounded, bordered, clipped box
+    const panel = (child, extra) =>
+        h(
+            View,
+            { style: [{ flex: 1, backgroundColor: MID.frame, paddingHorizontal: MID.gap, paddingBottom: MID.gap, paddingTop: 2 }, extra && extra.outer] },
+            h(
+                View,
+                {
+                    style: [{
+                        flex: 1, borderRadius: MID.radius, overflow: "hidden", backgroundColor: MID.panel,
+                        borderWidth: 1, borderColor: MID.border,
+                    }, extra && extra.inner],
+                },
+                child,
+            ),
+        );
+
+    function hookChat() {
+        if (lookStatus.chat.startsWith("ok")) return true;
+        const exp = exportsByPath(LOOK.chat);
+        if (!exp || typeof exp.default !== "function") return (lookStatus.chat = "waiting: chat not loaded yet"), false;
+        lookUnpatches.push(
+            patcher.after("default", exp, (args, res) => {
+                lookStatus.chatRenders = (lookStatus.chatRenders || 0) + 1;
+                if (!on("roundChat") || !res) return res;
+                return panel(res);
+            }),
+        );
+        lookStatus.chat = "ok";
+        return true;
+    }
+
+    function hookInput() {
+        if (lookStatus.input.startsWith("ok")) return true;
+        const exp = exportsByPath(LOOK.input);
+        const comp = exp && exp.default;
+        if (!comp) return (lookStatus.input = "waiting: chat box not loaded yet"), false;
+        const cb = (args, res) => {
+            lookStatus.inputRenders = (lookStatus.inputRenders || 0) + 1;
+            safe(() => {
+                if (!lookDiag.inputRoot) lookDiag.inputRoot = describeRoot(res);
+                if (!on("roundInput") || !res || !res.props) return;
+                res.props.style = [res.props.style, {
+                    marginHorizontal: MID.gap, marginBottom: 4, borderRadius: MID.radius, overflow: "hidden",
+                    backgroundColor: MID.frame, borderWidth: 1, borderColor: MID.border,
+                }];
+            });
+            return res;
+        };
+        let un = null;
+        if (comp.type && typeof comp.type.render === "function") un = patcher.after("render", comp.type, cb);
+        else if (typeof comp.render === "function") un = patcher.after("render", comp, cb);
+        else if (typeof comp.type === "function") un = patcher.after("type", comp, cb);
+        if (!un) return (lookStatus.input = "failed: unknown component shape"), false;
+        lookUnpatches.push(un);
+        lookStatus.input = "ok";
+        return true;
+    }
+
+    // record what the channel-list layout styles look like (for the next step)
+    function hookLayout() {
+        if (lookStatus.layout.startsWith("ok")) return true;
+        const exp = exportsByPath(LOOK.layout);
+        if (!exp || typeof exp.getLayoutStyles !== "function") return (lookStatus.layout = "waiting: channel list not loaded yet"), false;
+        lookUnpatches.push(
+            patcher.after("getLayoutStyles", exp, (args, res) => {
+                safe(() => {
+                    if (lookDiag.layoutStyles) return;
+                    const argInfo = safe(() => JSON.stringify(args, (k, v) => (typeof v === "function" ? "fn" : v)).slice(0, 300), "?");
+                    const parts = Object.keys(res || {}).map((k) => {
+                        const st = safe(() => StyleSheet.flatten(res[k]), {}) || {};
+                        return `  ${k}: ${safe(() => JSON.stringify(st), "?").slice(0, 220)}`;
+                    });
+                    lookDiag.layoutStyles = `args ${argInfo}\n${parts.join("\n")}`;
+                });
+                return res;
+            }),
+        );
+        lookStatus.layout = "ok (recording)";
+        return true;
+    }
+
+    function applyLook() {
+        safe(hookChat);
+        safe(hookInput);
+        safe(hookLayout);
+    }
+
+    function lookReport() {
+        return [
+            `--- look: chat ${lookStatus.chat} (${lookStatus.chatRenders || 0} draws) · chat box ${lookStatus.input} (${lookStatus.inputRenders || 0} draws) · layout ${lookStatus.layout}`,
+            `--- chat box root: ${lookDiag.inputRoot}`,
+            `--- channel list layout styles:\n${lookDiag.layoutStyles || "(not drawn yet - open a server's channel list)"}`,
+        ].join("\n");
+    }
+
     let timer = null;
     return {
         onLoad() {
@@ -154,15 +283,17 @@
             const loop = () => {
                 if (stopped) return;
                 safe(sweep);
+                safe(applyLook);
                 if (++tries < 40) timer = setTimeout(loop, 3000); // keep catching screens as they load (2 min)
             };
             loop();
-            toast(`Midnight Layout ${VERSION}: browse the app, then copy the report from its settings`);
+            toast(`Midnight Layout ${VERSION}: open a channel to see the rounded chat`);
         },
         onUnload() {
             stopped = true;
             if (timer) clearTimeout(timer);
             unpatches.splice(0).forEach((u) => safe(u));
+            lookUnpatches.splice(0).forEach((u) => safe(u));
             hooked.clear();
         },
         settings: Settings,
