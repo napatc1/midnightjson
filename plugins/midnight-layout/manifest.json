@@ -1,0 +1,8 @@
+{
+  "name": "Midnight Layout",
+  "description": "Step 1 of midnight's rounded, floating-panel look: finds which screens Discord draws on this phone.",
+  "authors": [{ "name": "napatc1", "id": "0" }],
+  "main": "index.js",
+  "hash": "c03f6e280b12cf7ab42eef8c0c361e43696dfa6bbe40035475f8f1d2d3916762",
+  "vendetta": { "icon": "ic_theme_24px" }
+}
