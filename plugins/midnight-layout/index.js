@@ -11,8 +11,9 @@
     const { View, Text, ScrollView, Pressable, StyleSheet } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "0.2.1";
-    const RX = /(channel_list|guild_sidebar\/native|messages\/native\/(Messages|Chat)|chat_input|chat\/native|home\/native|home_drawer\/native\/HomeDrawer(?!FolderRow|GuildRow)|private_channels|main_tabs|tabs_v2|bottom_tabs|navigation\/native|guilds_bar\/native\/GuildsBar\.tsx|user_profile\/native\/UserPanel|panels\/native|you_tab|notifications\/native\/Notifications|channel\/native\/Channel)/i;
+    const VERSION = "0.3.0";
+    // every module that can draw part of the main screens (server bar, channel list, DMs, chat, tabs)
+    const RX = /(main_tabs_v2\/native|channel_list_v2\/native|guilds_bar\/native|guild_sidebar\/native|home\/native|home_drawer\/native|chat\/native|chat_input\/native|you_tab|user_profile\/native\/UserPanel|notifications\/native|private_channels)/i;
 
     const safe = (fn, fb) => {
         try {
@@ -80,18 +81,19 @@
         const mods = safe(() => vendetta.metro.modules || window.modules, {}) || {};
         let added = 0;
         for (const id in mods) {
-            if (hooked.size > 160) break;
+            if (hooked.size > 500) break;
             const m = mods[id];
             const path = m && m.__filePath;
             if (!path || !RX.test(path) || !/\.tsx$/.test(path)) continue;
             const exp = safe(() => m.publicModule.exports);
             if (!exp || typeof exp !== "object") continue;
-            for (const key of safe(() => Object.keys(exp), []).slice(0, 6)) {
+            for (const key of safe(() => Object.keys(exp), []).slice(0, 12)) {
                 if (hooked.has(`${id}:${key}`)) continue;
                 const v = safe(() => exp[key]);
                 const isComp = typeof v === "function" || (v && typeof v === "object" && v.$$typeof);
                 if (!isComp) continue;
-                if (typeof v === "function" && /^use[A-Z]/.test(key)) continue; // skip hooks
+                // only components: "default" or Capitalised names (skips hooks, getters, render helpers, navigation utils)
+                if (key !== "default" && !/^[A-Z]/.test(key)) continue;
                 hookExport(path, id, exp, key);
                 added++;
             }
@@ -106,7 +108,7 @@
             const d = ReactNative.Dimensions.get("window");
             return `${Math.round(d.width)}x${Math.round(d.height)}`;
         }, "?");
-        return `Midnight Layout ${VERSION} report · screen ${dims} · ${rows.length} hooked, ${rows.filter((r) => r.renders).length} drawn\n` + lookReport() + "\n--- drawn parts:\n" + lines.filter((l) => !l.startsWith("0×")).slice(0, 60).join("\n");
+        return `Midnight Layout ${VERSION} report · screen ${dims} · ${rows.length} hooked, ${rows.filter((r) => r.renders).length} drawn\n` + lookReport() + "\n--- drawn parts:\n" + lines.filter((l) => !l.startsWith("0×")).slice(0, 150).join("\n");
     }
 
     function Row({ label, value, onChange }) {
@@ -133,7 +135,7 @@
             h(
                 Text,
                 { style: { color: "#8592AD", fontSize: 14, padding: 16, lineHeight: 20 } },
-                "Midnight look, step 2: rounded chat panel and message box. Open a server's channel list and a chat, then tap Copy report and paste it to Claude so the server bar and channel list can be rounded next.",
+                "Midnight look, step 3 scan. After installing: go to the Home tab, tap two different servers, open your DMs list, open the Notifications and You tabs, then come back and tap Copy report and paste it to Claude.",
             ),
             h(Row, { label: "Rounded chat panel", value: on("roundChat"), onChange: (v) => { storage.roundChat = v; force(); } }),
             h(Row, { label: "Rounded message box", value: on("roundInput"), onChange: (v) => { storage.roundInput = v; force(); } }),
@@ -288,7 +290,7 @@
                 if (++tries < 40) timer = setTimeout(loop, 3000); // keep catching screens as they load (2 min)
             };
             loop();
-            toast(`Midnight Layout ${VERSION}: open a channel to see the rounded chat`);
+            toast(`Midnight Layout ${VERSION}: tap two servers, open DMs, Notifications and You, then copy the report`);
         },
         onUnload() {
             stopped = true;
