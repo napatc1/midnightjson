@@ -10,14 +10,15 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.5.0";
+    const VERSION = "1.5.1";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
 
     const COLORS = {
-        panel: "#171B2B", border: "#4B5B9B33", text: "#E6EAF5", sub: "#8A93AD",
-        selected: "#3673CB", tile: "#1D2135",
+        // midnight (theme 3.1): frame #1C1F26, panel #16181D, raised #2B303B
+        panel: "#1C1F26", border: "#53607A33", text: "#E3E8F4", sub: "#8592AD",
+        selected: "#3673CB", tile: "#2B303B",
     };
 
     const safe = (fn, fallback) => {
@@ -213,8 +214,9 @@
                     View,
                     {
                         style: {
-                            width: 68, backgroundColor: COLORS.panel, paddingTop: 60, paddingBottom: 30,
-                            borderLeftWidth: 1, borderRightWidth: 1, borderColor: COLORS.border,
+                            width: 68, backgroundColor: COLORS.panel, paddingTop: 12, paddingBottom: 12,
+                            marginTop: 52, marginBottom: 24, marginLeft: 4, borderRadius: 16,
+                            borderWidth: 1, borderColor: COLORS.border, overflow: "hidden",
                         },
                     },
                     h(Image, {
